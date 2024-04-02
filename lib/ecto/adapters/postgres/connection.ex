@@ -1073,6 +1073,10 @@ if Code.ensure_loaded?(Postgrex) do
     # Always use the largest possible type for integers
     defp tagged_to_db(:id), do: "bigint"
     defp tagged_to_db(:integer), do: "bigint"
+
+    #mwuits jsonb fix:
+    defp tagged_to_db({:array, :map}), do: [tagged_to_db (:map)]
+
     defp tagged_to_db({:array, type}), do: [tagged_to_db(type), ?[, ?]]
     defp tagged_to_db(type), do: ecto_to_db(type)
 
