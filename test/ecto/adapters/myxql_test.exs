@@ -161,7 +161,7 @@ defmodule Ecto.Adapters.MyXQLTest do
                ~s{UNION ALL } <>
                ~s{(SELECT sc0.`id`, st1.`depth` + 1 FROM `categories` AS sc0 } <>
                ~s{INNER JOIN `tree` AS st1 ON st1.`id` = sc0.`parent_id`)) } <>
-               ~s{SELECT s0.`x`, t1.`id`, CAST(t1.`depth` AS unsigned) } <>
+               ~s{SELECT s0.`x`, t1.`id`, CAST(t1.`depth` AS signed) } <>
                ~s{FROM `schema` AS s0 } <>
                ~s{INNER JOIN `tree` AS t1 ON t1.`id` = s0.`category_id`}
   end
@@ -392,6 +392,23 @@ defmodule Ecto.Adapters.MyXQLTest do
 
                    all(query)
                  end
+
+    assert_raise Ecto.QueryError,
+                 ~r"DISTINCT with multiple columns is not supported by MySQL",
+                 fn ->
+                   query =
+                     from(row in Schema, as: :r, select: row.x)
+                     |> distinct(
+                       exists(
+                         from other_schema in "schema",
+                           where: other_schema.x == parent_as(:r).x,
+                           select: [other_schema.x]
+                       )
+                     )
+                     |> plan()
+
+                   all(query)
+                 end
   end
 
   test "coalesce" do
@@ -446,6 +463,22 @@ defmodule Ecto.Adapters.MyXQLTest do
         Schema |> order_by([r], [{^dir, r.x}]) |> select([r], r.x) |> plan() |> all()
       end
     end
+
+    query =
+      from(row in Schema, as: :r)
+      |> order_by(
+        asc:
+          exists(
+            from other_schema in "schema",
+              where: other_schema.x == parent_as(:r).x,
+              select: [other_schema.x]
+          )
+      )
+      |> select([r], r.x)
+      |> plan()
+
+    assert all(query) ==
+             ~s{SELECT s0.`x` FROM `schema` AS s0 ORDER BY exists(SELECT ss0.`x` AS `result` FROM `schema` AS ss0 WHERE (ss0.`x` = s0.`x`))}
   end
 
   test "union and union all" do
@@ -835,6 +868,21 @@ defmodule Ecto.Adapters.MyXQLTest do
 
     query = Schema |> group_by([r], []) |> select([r], r.x) |> plan()
     assert all(query) == ~s{SELECT s0.`x` FROM `schema` AS s0}
+
+    query =
+      from(row in Schema, as: :r, select: row.x)
+      |> group_by(
+        [r],
+        exists(
+          from other_schema in "schema",
+            where: other_schema.x == parent_as(:r).x,
+            select: [other_schema.x]
+        )
+      )
+      |> plan()
+
+    assert all(query) ==
+             ~s{SELECT s0.`x` FROM `schema` AS s0 GROUP BY exists(SELECT ss0.`x` AS `result` FROM `schema` AS ss0 WHERE (ss0.`x` = s0.`x`))}
   end
 
   test "interpolated values" do
@@ -1024,6 +1072,26 @@ defmodule Ecto.Adapters.MyXQLTest do
                ~s{SELECT s0.`x` FROM `schema` AS s0 WINDOW `w` AS (PARTITION BY s0.`x`)}
     end
 
+    test "window with subquery" do
+      query =
+        from(row in Schema, as: :r)
+        |> select([r], r.x)
+        |> windows([r],
+          w: [
+            order_by:
+              exists(
+                from other_schema in "schema",
+                  where: other_schema.x == parent_as(:r).x,
+                  select: [other_schema.x]
+              )
+          ]
+        )
+        |> plan
+
+      assert all(query) ==
+               ~s{SELECT s0.`x` FROM `schema` AS s0 WINDOW `w` AS (ORDER BY exists(SELECT ss0.`x` AS `result` FROM `schema` AS ss0 WHERE (ss0.`x` = s0.`x`)))}
+    end
+
     test "two windows" do
       query =
         Schema
@@ -1150,16 +1218,6 @@ defmodule Ecto.Adapters.MyXQLTest do
     assert all(query) ==
              ~s{SELECT TRUE FROM `schema` AS s0 INNER JOIN `schema2` AS s1 ON s0.`x` = s1.`z` } <>
                ~s{INNER JOIN `schema` AS s2 ON TRUE}
-  end
-
-  test "join with invalid qualifier" do
-    assert_raise Ecto.QueryError, ~r/join qualifier :array is not supported/, fn ->
-      Schema
-      |> join(:array, [p], q in Schema2, on: p.x == q.z)
-      |> select([], true)
-      |> plan()
-      |> all()
-    end
   end
 
   test "join with hints" do
@@ -1485,7 +1543,7 @@ defmodule Ecto.Adapters.MyXQLTest do
       |> plan()
       |> all()
 
-    cast_types = %{bid: "binary(16)", num: "unsigned"}
+    cast_types = %{bid: "binary(16)", num: "signed"}
     from_values_text = values_text(values, cast_types)
     join_values_text = values_text(values, cast_types)
     select_fields = Enum.map_join(types, ", ", fn {field, _} -> "v1.`#{field}`" end)
@@ -1508,7 +1566,7 @@ defmodule Ecto.Adapters.MyXQLTest do
       |> plan(:delete_all)
       |> delete_all()
 
-    cast_types = %{bid: "binary(16)", num: "unsigned"}
+    cast_types = %{bid: "binary(16)", num: "signed"}
     values_text = values_text(values, cast_types)
     fields = Enum.map_join(types, ",", fn {field, _} -> "`#{field}`" end)
 
@@ -1533,7 +1591,7 @@ defmodule Ecto.Adapters.MyXQLTest do
       |> plan(:update_all)
       |> update_all()
 
-    cast_types = %{bid: "binary(16)", num: "unsigned"}
+    cast_types = %{bid: "binary(16)", num: "signed"}
     values_text = values_text(values, cast_types)
     fields = Enum.map_join(types, ",", fn {field, _} -> "`#{field}`" end)
 
@@ -1563,7 +1621,8 @@ defmodule Ecto.Adapters.MyXQLTest do
 
   # DDL
 
-  import Ecto.Migration, only: [table: 1, table: 2, index: 2, index: 3, constraint: 3]
+  import Ecto.Migration,
+    only: [table: 1, table: 2, index: 2, index: 3, constraint: 2, constraint: 3]
 
   test "executing a string during migration" do
     assert execute_ddl("example") == ["example"]
@@ -1609,7 +1668,7 @@ defmodule Ecto.Adapters.MyXQLTest do
 
   test "create table with prefix" do
     create =
-      {:create, table(:posts, prefix: :foo),
+      {:create, table(:posts, prefix: "foo"),
        [{:add, :category_0, %Reference{table: :categories}, []}]}
 
     assert execute_ddl(create) == [
@@ -1623,7 +1682,7 @@ defmodule Ecto.Adapters.MyXQLTest do
 
   test "create table with comment on columns and table" do
     create =
-      {:create, table(:posts, comment: "comment", prefix: :foo),
+      {:create, table(:posts, comment: "comment", prefix: "foo"),
        [
          {:add, :category_0, %Reference{table: :categories}, [comment: "column comment"]},
          {:add, :created_at, :datetime, []},
@@ -1661,8 +1720,8 @@ defmodule Ecto.Adapters.MyXQLTest do
          {:add, :category_3, %Reference{table: :categories, on_delete: :delete_all},
           [null: false]},
          {:add, :category_4, %Reference{table: :categories, on_delete: :nilify_all}, []},
-         {:add, :category_5, %Reference{table: :categories, prefix: :foo, on_delete: :nilify_all},
-          []},
+         {:add, :category_5,
+          %Reference{table: :categories, options: [prefix: "foo"], on_delete: :nilify_all}, []},
          {:add, :category_6,
           %Reference{table: :categories, with: [here: :there], on_delete: :nilify_all}, []}
        ]}
@@ -1901,25 +1960,8 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   test "drop table with prefixes" do
-    drop = {:drop, table(:posts, prefix: :foo), :restrict}
+    drop = {:drop, table(:posts, prefix: "foo"), :restrict}
     assert execute_ddl(drop) == [~s|DROP TABLE `foo`.`posts`|]
-  end
-
-  test "drop constraint" do
-    assert_raise ArgumentError, ~r/MySQL adapter does not support constraints/, fn ->
-      execute_ddl(
-        {:drop, constraint(:products, "price_must_be_positive", prefix: :foo), :restrict}
-      )
-    end
-  end
-
-  test "drop_if_exists constraint" do
-    assert_raise ArgumentError, ~r/MySQL adapter does not support constraints/, fn ->
-      execute_ddl(
-        {:drop_if_exists, constraint(:products, "price_must_be_positive", prefix: :foo),
-         :restrict}
-      )
-    end
   end
 
   test "alter table" do
@@ -1945,6 +1987,7 @@ defmodule Ecto.Adapters.MyXQLTest do
          {:remove, :body, :text, []},
          {:remove, :space_id, %Reference{table: :author}, []},
          {:remove_if_exists, :body, :text},
+         {:remove_if_exists, :body},
          {:remove_if_exists, :space_id, %Reference{table: :author}}
        ]}
 
@@ -1972,6 +2015,7 @@ defmodule Ecto.Adapters.MyXQLTest do
              DROP `body`,
              DROP FOREIGN KEY `posts_space_id_fkey`,
              DROP `space_id`,
+             DROP IF EXISTS `body`,
              DROP IF EXISTS `body`,
              DROP FOREIGN KEY IF EXISTS `posts_space_id_fkey`,
              DROP IF EXISTS `space_id`
@@ -2008,7 +2052,7 @@ defmodule Ecto.Adapters.MyXQLTest do
 
   test "alter table with prefix" do
     alter =
-      {:alter, table(:posts, prefix: :foo),
+      {:alter, table(:posts, prefix: "foo"),
        [
          {:add, :author_id, %Reference{table: :author}, []},
          {:modify, :permalink_id, %Reference{table: :permalinks}, null: false}
@@ -2071,7 +2115,7 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   test "create index with prefix" do
-    create = {:create, index(:posts, [:category_id, :permalink], prefix: :foo)}
+    create = {:create, index(:posts, [:category_id, :permalink], prefix: "foo")}
 
     assert execute_ddl(create) ==
              [
@@ -2094,15 +2138,34 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   test "create constraints" do
-    assert_raise ArgumentError, "MySQL adapter does not support check constraints", fn ->
-      create = {:create, constraint(:products, "foo", check: "price")}
-      assert execute_ddl(create)
-    end
+    create = {:create, constraint(:products, "price_must_be_positive", check: "price > 0")}
 
-    assert_raise ArgumentError, "MySQL adapter does not support check constraints", fn ->
-      create = {:create, constraint(:products, "foo", check: "price", validate: false)}
-      assert execute_ddl(create)
-    end
+    assert execute_ddl(create) ==
+             [
+               ~s|ALTER TABLE `products` ADD CONSTRAINT `price_must_be_positive` CHECK (price > 0)|
+             ]
+
+    create =
+      {:create,
+       constraint(:products, "price_must_be_positive", check: "price > 0", prefix: "foo")}
+
+    assert execute_ddl(create) ==
+             [
+               ~s|ALTER TABLE `foo`.`products` ADD CONSTRAINT `price_must_be_positive` CHECK (price > 0)|
+             ]
+
+    create =
+      {:create,
+       constraint(:products, "price_must_be_positive",
+         check: "price > 0",
+         prefix: "foo",
+         validate: false
+       )}
+
+    assert execute_ddl(create) ==
+             [
+               ~s|ALTER TABLE `foo`.`products` ADD CONSTRAINT `price_must_be_positive` CHECK (price > 0) NOT ENFORCED|
+             ]
 
     assert_raise ArgumentError, "MySQL adapter does not support exclusion constraints", fn ->
       create = {:create, constraint(:products, "bar", exclude: "price")}
@@ -2113,6 +2176,37 @@ defmodule Ecto.Adapters.MyXQLTest do
       create = {:create, constraint(:products, "bar", exclude: "price", validate: false)}
       assert execute_ddl(create)
     end
+  end
+
+  test "drop constraint" do
+    drop = {:drop, constraint(:products, "price_must_be_positive"), :restrict}
+
+    assert execute_ddl(drop) ==
+             [~s|ALTER TABLE `products` DROP CONSTRAINT `price_must_be_positive`|]
+
+    drop = {:drop, constraint(:products, "price_must_be_positive", prefix: "foo"), :restrict}
+
+    assert execute_ddl(drop) ==
+             [~s|ALTER TABLE `foo`.`products` DROP CONSTRAINT `price_must_be_positive`|]
+
+    drop_cascade = {:drop, constraint(:products, "price_must_be_positive"), :cascade}
+
+    assert_raise ArgumentError,
+                 ~r/MySQL does not support `CASCADE` in `DROP CONSTRAINT` commands/,
+                 fn ->
+                   execute_ddl(drop_cascade)
+                 end
+  end
+
+  test "drop_if_exists constraint" do
+    assert_raise ArgumentError,
+                 ~r/MySQL adapter does not support `drop_if_exists` for constraints/,
+                 fn ->
+                   execute_ddl(
+                     {:drop_if_exists,
+                      constraint(:products, "price_must_be_positive", prefix: "foo"), :restrict}
+                   )
+                 end
   end
 
   test "create an index using a different type" do
@@ -2128,7 +2222,7 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   test "drop index with prefix" do
-    drop = {:drop, index(:posts, [:id], name: "posts$main", prefix: :foo), :restrict}
+    drop = {:drop, index(:posts, [:id], name: "posts$main", prefix: "foo"), :restrict}
     assert execute_ddl(drop) == [~s|DROP INDEX `posts$main` ON `foo`.`posts`|]
   end
 
@@ -2146,7 +2240,7 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   test "rename table with prefix" do
-    rename = {:rename, table(:posts, prefix: :foo), table(:new_posts, prefix: :foo)}
+    rename = {:rename, table(:posts, prefix: "foo"), table(:new_posts, prefix: "foo")}
     assert execute_ddl(rename) == [~s|RENAME TABLE `foo`.`posts` TO `foo`.`new_posts`|]
   end
 
@@ -2159,7 +2253,7 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   test "rename column in prefixed table" do
-    rename = {:rename, table(:posts, prefix: :foo), :given_name, :first_name}
+    rename = {:rename, table(:posts, prefix: "foo"), :given_name, :first_name}
 
     assert execute_ddl(rename) == [
              ~s|ALTER TABLE `foo`.`posts` RENAME COLUMN `given_name` TO `first_name`|

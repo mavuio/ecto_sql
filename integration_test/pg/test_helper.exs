@@ -6,11 +6,17 @@ Application.put_env(:ecto, :async_integration_tests, true)
 Application.put_env(:ecto_sql, :lock_for_update, "FOR UPDATE")
 
 # Configure PG connection
-Application.put_env(:ecto_sql, :pg_test_url,
+Application.put_env(
+  :ecto_sql,
+  :pg_test_url,
   "ecto://" <> (System.get_env("PG_URL") || "postgres:postgres@127.0.0.1")
 )
 
-Code.require_file "../support/repo.exs", __DIR__
+Code.require_file("../support/repo.exs", __DIR__)
+
+# Define type module
+opts = if Code.ensure_loaded?(Duration), do: [interval_decode_type: Duration], else: []
+Postgrex.Types.define(Postgrex.EctoTypes, [], opts)
 
 # Pool repo for async, safe tests
 alias Ecto.Integration.TestRepo
@@ -19,7 +25,8 @@ Application.put_env(:ecto_sql, TestRepo,
   url: Application.get_env(:ecto_sql, :pg_test_url) <> "/ecto_test",
   pool: Ecto.Adapters.SQL.Sandbox,
   show_sensitive_data_on_connection_error: true,
-  log: false
+  log: false,
+  types: Postgrex.EctoTypes
 )
 
 defmodule Ecto.Integration.TestRepo do
@@ -54,21 +61,28 @@ end
 
 pool_repo_config = [
   url: Application.get_env(:ecto_sql, :pg_test_url) <> "/ecto_test",
-  pool_size: 10,
+  pool_size: 5,
+  pool_count: String.to_integer(System.get_env("POOL_COUNT", "1")),
   max_restarts: 20,
   max_seconds: 10
 ]
 
 Application.put_env(:ecto_sql, PoolRepo, pool_repo_config)
-Application.put_env(:ecto_sql, AdvisoryLockPoolRepo, pool_repo_config ++ [
-  migration_source: "advisory_lock_schema_migrations",
-  migration_lock: :pg_advisory_lock
-])
+
+Application.put_env(
+  :ecto_sql,
+  AdvisoryLockPoolRepo,
+  pool_repo_config ++
+    [
+      migration_source: "advisory_lock_schema_migrations",
+      migration_lock: :pg_advisory_lock
+    ]
+)
 
 # Load support files
 ecto = Mix.Project.deps_paths()[:ecto]
-Code.require_file "#{ecto}/integration_test/support/schemas.exs", __DIR__
-Code.require_file "../support/migration.exs", __DIR__
+Code.require_file("#{ecto}/integration_test/support/schemas.exs", __DIR__)
+Code.require_file("../support/migration.exs", __DIR__)
 
 defmodule Ecto.Integration.Case do
   use ExUnit.CaseTemplate
@@ -81,7 +95,7 @@ end
 {:ok, _} = Ecto.Adapters.Postgres.ensure_all_started(TestRepo.config(), :temporary)
 
 # Load up the repository, start it, and run migrations
-_   = Ecto.Adapters.Postgres.storage_down(TestRepo.config())
+_ = Ecto.Adapters.Postgres.storage_down(TestRepo.config())
 :ok = Ecto.Adapters.Postgres.storage_up(TestRepo.config())
 
 {:ok, _pid} = TestRepo.start_link()
@@ -100,13 +114,19 @@ version =
 excludes = [:selected_as_with_having, :selected_as_with_order_by_expression]
 excludes_above_9_5 = [:without_conflict_target]
 excludes_below_9_6 = [:add_column_if_not_exists, :no_error_on_conditional_column_migration]
+excludes_below_12_0 = [:plan_cache_mode]
 excludes_below_15_0 = [:on_delete_nilify_column_list]
 
 exclude_list = excludes ++ excludes_above_9_5
 
 cond do
   Version.match?(version, "< 9.6.0") ->
-    ExUnit.configure(exclude: exclude_list ++ excludes_below_9_6 ++ excludes_below_15_0)
+    ExUnit.configure(
+      exclude: exclude_list ++ excludes_below_9_6 ++ excludes_below_12_0 ++ excludes_below_15_0
+    )
+
+  Version.match?(version, "< 12.0.0") ->
+    ExUnit.configure(exclude: exclude_list ++ excludes_below_12_0 ++ excludes_below_15_0)
 
   Version.match?(version, "< 15.0.0") ->
     ExUnit.configure(exclude: exclude_list ++ excludes_below_15_0)

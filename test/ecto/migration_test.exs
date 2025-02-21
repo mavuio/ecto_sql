@@ -129,14 +129,20 @@ defmodule Ecto.MigrationTest do
     assert references(:posts, type: :uuid, column: :other) ==
              %Reference{table: "posts", column: :other, type: :uuid, prefix: nil}
 
-    assert references(:posts, type: :uuid, column: :other, prefix: :blog) ==
-             %Reference{table: "posts", column: :other, type: :uuid, prefix: :blog}
+    assert references(:posts, type: :uuid, column: :other, prefix: "blog") ==
+             %Reference{
+               table: "posts",
+               column: :other,
+               type: :uuid,
+               prefix: "blog",
+               options: [prefix: "blog"]
+             }
   end
 
-  @tag repo_config: [migration_foreign_key: [type: :uuid, column: :other, prefix: :blog]]
+  @tag repo_config: [migration_foreign_key: [type: :uuid, column: :other, prefix: "blog"]]
   test "create a reference with using the foreign key repo config" do
     assert references(:posts) ==
-             %Reference{table: "posts", column: :other, type: :uuid, prefix: :blog}
+             %Reference{table: "posts", column: :other, type: :uuid, prefix: "blog"}
   end
 
   @tag repo_config: [migration_primary_key: [type: :binary_id]]
@@ -276,7 +282,7 @@ defmodule Ecto.MigrationTest do
 
       assert result == table(:posts)
 
-      create table = table(:posts, primary_key: false, timestamps: false) do
+      create table = table(:posts, primary_key: false) do
         add :title, :string
       end
 
@@ -463,6 +469,7 @@ defmodule Ecto.MigrationTest do
         remove :views
         remove :status, :string
         remove_if_exists :status, :string
+        remove_if_exists :status
       end
 
       flush()
@@ -475,7 +482,8 @@ defmodule Ecto.MigrationTest do
                   {:modify, :title, :text, []},
                   {:remove, :views},
                   {:remove, :status, :string, []},
-                  {:remove_if_exists, :status, :string}
+                  {:remove_if_exists, :status, :string},
+                  {:remove_if_exists, :status}
                 ]}
     end
 
@@ -705,7 +713,7 @@ defmodule Ecto.MigrationTest do
       assert table.prefix == :foo
     end
 
-    @tag prefix: :bar
+    @tag prefix: "bar"
     test "raise error when prefixes don't match" do
       assert_raise Ecto.MigrationError,
                    "the :prefix option `foo` does not match the migrator prefix `bar`",

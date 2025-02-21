@@ -4,6 +4,8 @@ ExUnit.start(
   exclude: [
     # not sure how to support this yet
     :aggregate_filters,
+    :bitstring_type,
+    :duration_type,
     # subquery contains ORDER BY and that is not supported
     :subquery_aggregates,
     # sql don't have array type
@@ -56,7 +58,13 @@ ExUnit.start(
     # MSSQL can't reference aliased columns in ORDER BY expressions
     :selected_as_with_order_by_expression,
     # MSSQL doesn't support specifying columns for ON DELETE SET NULL
-    :on_delete_nilify_column_list
+    :on_delete_nilify_column_list,
+    # MSSQL doesnt' support anything except a single column in DISTINCT
+    :multicolumn_distinct,
+    # MSSQL doesnt' support subqueries in group by or in distinct
+    :subquery_in_group_by,
+    :subquery_in_distinct,
+    :subquery_in_order_by
   ]
 )
 

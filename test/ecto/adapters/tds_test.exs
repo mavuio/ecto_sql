@@ -463,6 +463,23 @@ defmodule Ecto.Adapters.TdsTest do
 
                    all(query)
                  end
+
+    assert_raise Ecto.QueryError,
+                 ~r"DISTINCT with multiple columns is not supported by MsSQL",
+                 fn ->
+                   query =
+                     from(row in Schema, as: :r, select: row.x)
+                     |> distinct(
+                       exists(
+                         from other_schema in "schema",
+                           where: other_schema.x == parent_as(:r).x,
+                           select: [other_schema.x]
+                       )
+                     )
+                     |> plan()
+
+                   all(query)
+                 end
   end
 
   test "select with operation" do
@@ -1045,16 +1062,6 @@ defmodule Ecto.Adapters.TdsTest do
                ~s{INNER JOIN [schema] AS s2 ON 1 = 1}
   end
 
-  test "join with invalid qualifier" do
-    assert_raise Ecto.QueryError, ~r/join qualifier :array is not supported/, fn ->
-      Schema
-      |> join(:array, [p], q in Schema2, on: p.x == q.z)
-      |> select([], true)
-      |> plan()
-      |> all()
-    end
-  end
-
   test "join with hints" do
     assert Schema
            |> join(:inner, [p], q in Schema2, hints: ["USE INDEX FOO", "USE INDEX BAR"], on: true)
@@ -1433,7 +1440,7 @@ defmodule Ecto.Adapters.TdsTest do
 
   test "create table with prefix" do
     create =
-      {:create, table(:posts, prefix: :foo),
+      {:create, table(:posts, prefix: "foo"),
        [{:add, :category_0, %Reference{table: :categories}, []}]}
 
     assert execute_ddl(create) == [
@@ -1457,8 +1464,8 @@ defmodule Ecto.Adapters.TdsTest do
          {:add, :category_3, %Reference{table: :categories, on_delete: :delete_all},
           [null: false]},
          {:add, :category_4, %Reference{table: :categories, on_delete: :nilify_all}, []},
-         {:add, :category_5, %Reference{table: :categories, prefix: :foo, on_delete: :nilify_all},
-          []},
+         {:add, :category_5,
+          %Reference{table: :categories, options: [prefix: "foo"], on_delete: :nilify_all}, []},
          {:add, :category_6,
           %Reference{table: :categories, with: [here: :there], on_delete: :nilify_all}, []}
        ]}
@@ -1593,7 +1600,7 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   test "drop table with prefixes" do
-    drop = {:drop, table(:posts, prefix: :foo), :restrict}
+    drop = {:drop, table(:posts, prefix: "foo"), :restrict}
     assert execute_ddl(drop) == ["DROP TABLE [foo].[posts]; "]
   end
 
@@ -1766,7 +1773,7 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   test "rename table with prefix" do
-    rename = {:rename, table(:posts, prefix: :foo), table(:new_posts, prefix: :foo)}
+    rename = {:rename, table(:posts, prefix: "foo"), table(:new_posts, prefix: "foo")}
     assert execute_ddl(rename) == [~s|EXEC sp_rename 'foo.posts', 'foo.new_posts'|]
   end
 
@@ -1778,7 +1785,7 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   test "rename column in table with prefixes" do
-    rename = {:rename, table(:posts, prefix: :foo), :given_name, :first_name}
+    rename = {:rename, table(:posts, prefix: "foo"), :given_name, :first_name}
 
     assert execute_ddl(rename) ==
              ["EXEC sp_rename 'foo.posts.given_name', 'first_name', 'COLUMN'"]
@@ -1803,7 +1810,7 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   test "create index with prefix" do
-    create = {:create, index(:posts, [:category_id, :permalink], prefix: :foo)}
+    create = {:create, index(:posts, [:category_id, :permalink], prefix: "foo")}
 
     assert execute_ddl(create) ==
              [
@@ -1812,7 +1819,7 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   test "create index with prefix if not exists" do
-    create = {:create_if_not_exists, index(:posts, [:category_id, :permalink], prefix: :foo)}
+    create = {:create_if_not_exists, index(:posts, [:category_id, :permalink], prefix: "foo")}
 
     assert execute_ddl(create) ==
              [
@@ -1839,7 +1846,7 @@ defmodule Ecto.Adapters.TdsTest do
     assert execute_ddl(create) ==
              [~s|CREATE UNIQUE INDEX [posts_permalink_index] ON [posts] ([permalink]);|]
 
-    create = {:create, index(:posts, [:permalink], unique: true, prefix: :foo)}
+    create = {:create, index(:posts, [:permalink], unique: true, prefix: "foo")}
 
     assert execute_ddl(create) ==
              [~s|CREATE UNIQUE INDEX [posts_permalink_index] ON [foo].[posts] ([permalink]);|]
@@ -1866,7 +1873,7 @@ defmodule Ecto.Adapters.TdsTest do
 
   test "drop index with prefix" do
     drop =
-      {:drop, index(:posts, [:id], name: "posts_category_id_permalink_index", prefix: :foo),
+      {:drop, index(:posts, [:id], name: "posts_category_id_permalink_index", prefix: "foo"),
        :restrict}
 
     assert execute_ddl(drop) ==
@@ -1876,7 +1883,7 @@ defmodule Ecto.Adapters.TdsTest do
   test "drop index with prefix if exists" do
     drop =
       {:drop_if_exists,
-       index(:posts, [:id], name: "posts_category_id_permalink_index", prefix: :foo), :restrict}
+       index(:posts, [:id], name: "posts_category_id_permalink_index", prefix: "foo"), :restrict}
 
     assert execute_ddl(drop) ==
              [
@@ -1892,7 +1899,7 @@ defmodule Ecto.Adapters.TdsTest do
 
     drop_cascade =
       {:drop_if_exists,
-       index(:posts, [:id], name: "posts_category_id_permalink_index", prefix: :foo), :cascade}
+       index(:posts, [:id], name: "posts_category_id_permalink_index", prefix: "foo"), :cascade}
 
     assert_raise ArgumentError, ~r"MSSQL does not support `CASCADE` in DROP INDEX commands", fn ->
       execute_ddl(drop_cascade)
@@ -1910,6 +1917,138 @@ defmodule Ecto.Adapters.TdsTest do
     assert execute_ddl(rename) == [
              ~s|sp_rename N'people.persons_name_index', N'people_name_index', N'INDEX'|
            ]
+  end
+
+  describe "prepare_params/1" do
+    test "prepares string params" do
+      assert SQL.prepare_params(["string", "string" <> <<0>>]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: "string",
+                 type: :string
+               },
+               %Tds.Parameter{
+                 name: "@2",
+                 value: "string" <> <<0>>,
+                 type: :binary
+               }
+             ]
+    end
+
+    test "prepares integer param" do
+      assert SQL.prepare_params([6]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: 6
+               }
+             ]
+    end
+
+    test "prepares float param" do
+      assert SQL.prepare_params([4.2]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: 4.2
+               }
+             ]
+    end
+
+    test "prepares boolean params" do
+      assert SQL.prepare_params([true, false]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: 1,
+                 type: :boolean
+               },
+               %Tds.Parameter{
+                 name: "@2",
+                 value: 0,
+                 type: :boolean
+               }
+             ]
+    end
+
+    test "prepares Decimal param" do
+      assert SQL.prepare_params([Decimal.new(17)]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: Decimal.new("17"),
+                 type: :decimal
+               }
+             ]
+    end
+
+    test "prepares map param" do
+      assert SQL.prepare_params([%{}]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: "{}",
+                 type: :string
+               }
+             ]
+    end
+
+    test "prepares date and time params" do
+      assert SQL.prepare_params([
+               ~N[2019-01-01 00:00:00],
+               ~U[2019-01-01 00:00:00Z],
+               ~D[2019-01-01],
+               ~T[12:34:56]
+             ]) == [
+               %Tds.Parameter{
+                 name: "@1",
+                 value: ~N[2019-01-01 00:00:00],
+                 type: :datetime2
+               },
+               %Tds.Parameter{
+                 name: "@2",
+                 value: ~U[2019-01-01 00:00:00Z],
+                 type: :datetimeoffset
+               },
+               %Tds.Parameter{
+                 name: "@3",
+                 value: ~D[2019-01-01],
+                 type: :date
+               },
+               %Tds.Parameter{
+                 name: "@4",
+                 direction: :input,
+                 value: ~T[12:34:56],
+                 type: :time
+               }
+             ]
+    end
+
+    test "prepares Tds.Parameter params" do
+      params = [
+        %Tds.Parameter{name: "@IntParam", value: 17},
+        %Tds.Parameter{value: "string"},
+        %Tds.Parameter{name: "@StringIntParam", value: "17", type: :int}
+      ]
+
+      assert SQL.prepare_params(params) == [
+               %Tds.Parameter{
+                 name: "@IntParam",
+                 value: 17
+               },
+               %Tds.Parameter{
+                 name: "@1",
+                 value: "string",
+                 type: :string
+               },
+               %Tds.Parameter{
+                 name: "@StringIntParam",
+                 value: "17",
+                 type: :int
+               }
+             ]
+    end
+
+    test "params without a valid name raise an error" do
+      assert_raise ArgumentError, ~r/Tds parameter names must begin with @/, fn ->
+        SQL.prepare_params([%Tds.Parameter{name: "Param"}])
+      end
+    end
   end
 
   defp remove_newlines(string) when is_binary(string) do

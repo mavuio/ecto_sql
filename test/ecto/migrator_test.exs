@@ -3,6 +3,7 @@ defmodule Ecto.MigratorTest do
 
   import Support.FileHelpers
   import Ecto.Migrator
+  import ExUnit.CaptureIO
   import ExUnit.CaptureLog
 
   alias EctoSQL.TestRepo
@@ -35,11 +36,11 @@ defmodule Ecto.MigratorTest do
     use Ecto.Migration
 
     def change do
-      create table(:comments, prefix: :foo) do
+      create table(:comments, prefix: "foo") do
         add :name, :string
       end
 
-      create index(:posts, [:title], prefix: :foo)
+      create index(:posts, [:title], prefix: "foo")
     end
   end
 
@@ -259,24 +260,24 @@ defmodule Ecto.MigratorTest do
 
   test "migrator prefix" do
     capture_log(fn ->
-      :ok = up(TestRepo, 10, ChangeMigration, prefix: :custom)
+      :ok = up(TestRepo, 10, ChangeMigration, prefix: "custom")
     end)
 
-    assert [{10, :custom} | _] = MigrationsAgent.get()
+    assert [{10, "custom"} | _] = MigrationsAgent.get()
 
     Process.put(:repo_default_options, prefix: nil)
 
     capture_log(fn ->
-      :ok = up(TestRepo, 11, ChangeMigration, prefix: :custom)
+      :ok = up(TestRepo, 11, ChangeMigration, prefix: "custom")
     end)
 
-    assert [{11, :custom} | _] = MigrationsAgent.get()
+    assert [{11, "custom"} | _] = MigrationsAgent.get()
 
     capture_log(fn ->
-      :already_up = up(TestRepo, 11, ChangeMigration, prefix: :custom, log: true)
+      :already_up = up(TestRepo, 11, ChangeMigration, prefix: "custom", log: true)
     end)
 
-    assert [{11, :custom} | _] = MigrationsAgent.get()
+    assert [{11, "custom"} | _] = MigrationsAgent.get()
   end
 
   test "logs migrations" do
@@ -402,6 +403,22 @@ defmodule Ecto.MigratorTest do
   test "down raises error when missing down/0 and change/0" do
     assert_raise Ecto.MigrationError, fn ->
       Ecto.Migrator.down(TestRepo, 1, InvalidMigration, log: false)
+    end
+  end
+
+  # TODO: Remove when we require Elixir 1.14
+  if Version.match?(System.version(), ">= 1.14.0") do
+    test "warns for .ex files that look like migrations" do
+      in_tmp(fn path ->
+        output =
+          capture_io(:stderr, fn ->
+            create_migration("123_looks_like_migration.ex")
+            assert run(TestRepo, path, :up, all: true, log: false) == []
+          end)
+
+        assert output =~ "file looks like a migration but ends in .ex"
+        assert output =~ "123_looks_like_migration.ex"
+      end)
     end
   end
 

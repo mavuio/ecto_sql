@@ -530,6 +530,20 @@ defmodule Ecto.Adapters.PostgresTest do
 
     query = Schema |> distinct(false) |> select([r], {r.x, r.y}) |> plan()
     assert all(query) == ~s{SELECT s0."x", s0."y" FROM "schema" AS s0}
+
+    query =
+      from(row in Schema, as: :r, select: row.x)
+      |> distinct(
+        exists(
+          from other_schema in "schema",
+            where: other_schema.x == parent_as(:r).x,
+            select: [other_schema.x]
+        )
+      )
+      |> plan()
+
+    assert all(query) ==
+             ~s{SELECT DISTINCT ON (exists((SELECT ss0."x" AS "result" FROM "schema" AS ss0 WHERE (ss0."x" = s0."x")))) s0."x" FROM "schema" AS s0}
   end
 
   test "distinct with order by" do
@@ -617,6 +631,22 @@ defmodule Ecto.Adapters.PostgresTest do
 
     assert all(query) ==
              ~s{SELECT s0."x" FROM "schema" AS s0 ORDER BY s0."x" ASC NULLS FIRST, s0."y" DESC NULLS FIRST}
+
+    query =
+      from(row in Schema, as: :r)
+      |> order_by(
+        asc:
+          exists(
+            from other_schema in "schema",
+              where: other_schema.x == parent_as(:r).x,
+              select: [other_schema.x]
+          )
+      )
+      |> select([r], r.x)
+      |> plan()
+
+    assert all(query) ==
+             ~s{SELECT s0."x" FROM "schema" AS s0 ORDER BY exists((SELECT ss0."x" AS "result" FROM "schema" AS ss0 WHERE (ss0."x" = s0."x")))}
 
     query =
       Schema
@@ -1057,6 +1087,21 @@ defmodule Ecto.Adapters.PostgresTest do
 
     query = Schema |> group_by([r], []) |> select([r], r.x) |> plan()
     assert all(query) == ~s{SELECT s0."x" FROM "schema" AS s0}
+
+    query =
+      from(row in Schema, as: :r, select: row.x)
+      |> group_by(
+        [r],
+        exists(
+          from other_schema in "schema",
+            where: other_schema.x == parent_as(:r).x,
+            select: [other_schema.x]
+        )
+      )
+      |> plan()
+
+    assert all(query) ==
+             ~s{SELECT s0."x" FROM "schema" AS s0 GROUP BY exists((SELECT ss0."x" AS "result" FROM "schema" AS ss0 WHERE (ss0."x" = s0."x")))}
   end
 
   test "arrays and sigils" do
@@ -1364,6 +1409,26 @@ defmodule Ecto.Adapters.PostgresTest do
                ~s{SELECT s0."x" FROM "schema" AS s0 WINDOW "w" AS (PARTITION BY s0."x")}
     end
 
+    test "window with subquery" do
+      query =
+        from(row in Schema, as: :r)
+        |> select([r], r.x)
+        |> windows([r],
+          w: [
+            order_by:
+              exists(
+                from other_schema in "schema",
+                  where: other_schema.x == parent_as(:r).x,
+                  select: [other_schema.x]
+              )
+          ]
+        )
+        |> plan
+
+      assert all(query) ==
+               ~s{SELECT s0."x" FROM "schema" AS s0 WINDOW "w" AS (ORDER BY exists((SELECT ss0."x" AS "result" FROM "schema" AS ss0 WHERE (ss0."x" = s0."x"))))}
+    end
+
     test "two windows" do
       query =
         Schema
@@ -1442,7 +1507,7 @@ defmodule Ecto.Adapters.PostgresTest do
                ~s{SELECT s0."x" FROM "schema" AS s0 WINDOW "w" AS (PARTITION BY s0."x", s0."z" ORDER BY s0."x")}
     end
 
-    test "partition by ond order by over" do
+    test "partition by one order by over" do
       query =
         Schema
         |> select([r], count(r.x) |> over(partition_by: [r.x, r.z], order_by: r.x))
@@ -1492,16 +1557,6 @@ defmodule Ecto.Adapters.PostgresTest do
     assert all(query) ==
              ~s{SELECT TRUE FROM "schema" AS s0 INNER JOIN "schema2" AS s1 ON s0."x" = s1."z" } <>
                ~s{INNER JOIN "schema" AS s2 ON TRUE}
-  end
-
-  test "join with invalid qualifier" do
-    assert_raise Ecto.QueryError, ~r/join qualifier :array is not supported/, fn ->
-      Schema
-      |> join(:array, [p], q in Schema2, on: p.x == q.z)
-      |> select([], true)
-      |> plan()
-      |> all()
-    end
   end
 
   test "join with hints" do
@@ -1990,6 +2045,10 @@ defmodule Ecto.Adapters.PostgresTest do
          {:add, :on_hand, :integer, [default: 0, null: true]},
          {:add, :published_at, :"time without time zone", [null: true]},
          {:add, :is_active, :boolean, [default: true]},
+         {:add, :flags, :bitstring, [null: false]},
+         {:add, :flags_with_default, :bitstring, [default: <<42::10>>]},
+         {:add, :flags_with_size, :bitstring, [size: 10]},
+         {:add, :dur, :duration, [fields: "YEAR TO MONTH", precision: 2, default: "1 MONTH"]},
          {:add, :tags, {:array, :string}, [default: []]},
          {:add, :languages, {:array, :string}, [default: ["pt", "es"]]},
          {:add, :limits, {:array, :integer}, [default: [100, 30_000]]}
@@ -2002,6 +2061,10 @@ defmodule Ecto.Adapters.PostgresTest do
              "on_hand" integer DEFAULT 0 NULL,
              "published_at" time without time zone NULL,
              "is_active" boolean DEFAULT true,
+             "flags" varbit NOT NULL,
+             "flags_with_default" varbit DEFAULT b'0000101010',
+             "flags_with_size" varbit(10),
+             "dur" interval YEAR TO MONTH(2) DEFAULT '1 MONTH',
              "tags" varchar(255)[] DEFAULT ARRAY[]::varchar[],
              "languages" varchar(255)[] DEFAULT ARRAY['pt','es']::varchar[],
              "limits" integer[] DEFAULT ARRAY[100,30000]::integer[])
@@ -2012,7 +2075,7 @@ defmodule Ecto.Adapters.PostgresTest do
 
   test "create table with prefix" do
     create =
-      {:create, table(:posts, prefix: :foo),
+      {:create, table(:posts, prefix: "foo"),
        [{:add, :category_0, %Reference{table: :categories}, []}]}
 
     assert execute_ddl(create) == [
@@ -2102,8 +2165,8 @@ defmodule Ecto.Adapters.PostgresTest do
           [null: false]},
          {:add, :category_9, %Reference{table: :categories, on_delete: :restrict}, []},
          {:add, :category_10, %Reference{table: :categories, on_update: :restrict}, []},
-         {:add, :category_11, %Reference{table: :categories, prefix: "foo", on_update: :restrict},
-          []},
+         {:add, :category_11,
+          %Reference{table: :categories, options: [prefix: "foo"], on_update: :restrict}, []},
          {:add, :category_12, %Reference{table: :categories, with: [here: :there]}, []},
          {:add, :category_13,
           %Reference{
@@ -2406,7 +2469,7 @@ defmodule Ecto.Adapters.PostgresTest do
   end
 
   test "drop table with prefix" do
-    drop = {:drop, table(:posts, prefix: :foo), :restrict}
+    drop = {:drop, table(:posts, prefix: "foo"), :restrict}
     assert execute_ddl(drop) == [~s|DROP TABLE "foo"."posts"|]
   end
 
@@ -2414,7 +2477,7 @@ defmodule Ecto.Adapters.PostgresTest do
     drop = {:drop, table(:posts), :cascade}
     assert execute_ddl(drop) == [~s|DROP TABLE "posts" CASCADE|]
 
-    drop = {:drop, table(:posts, prefix: :foo), :cascade}
+    drop = {:drop, table(:posts, prefix: "foo"), :cascade}
     assert execute_ddl(drop) == [~s|DROP TABLE "foo"."posts" CASCADE|]
   end
 
@@ -2442,6 +2505,7 @@ defmodule Ecto.Adapters.PostgresTest do
          {:remove, :body, :text, []},
          {:remove, :space_id, %Reference{table: :author}, []},
          {:remove_if_exists, :body, :text},
+         {:remove_if_exists, :body},
          {:remove_if_exists, :space_id, %Reference{table: :author}}
        ]}
 
@@ -2479,6 +2543,7 @@ defmodule Ecto.Adapters.PostgresTest do
              DROP COLUMN "body",
              DROP CONSTRAINT "posts_space_id_fkey",
              DROP COLUMN "space_id",
+             DROP COLUMN IF EXISTS "body",
              DROP COLUMN IF EXISTS "body",
              DROP CONSTRAINT IF EXISTS "posts_space_id_fkey",
              DROP COLUMN IF EXISTS "space_id"
@@ -2518,7 +2583,7 @@ defmodule Ecto.Adapters.PostgresTest do
 
   test "alter table with prefix" do
     alter =
-      {:alter, table(:posts, prefix: :foo),
+      {:alter, table(:posts, prefix: "foo"),
        [
          {:add, :author_id, %Reference{table: :author}, []},
          {:modify, :permalink_id, %Reference{table: :permalinks}, null: false}
@@ -2586,14 +2651,14 @@ defmodule Ecto.Adapters.PostgresTest do
   end
 
   test "create index with prefix" do
-    create = {:create, index(:posts, [:category_id, :permalink], prefix: :foo)}
+    create = {:create, index(:posts, [:category_id, :permalink], prefix: "foo")}
 
     assert execute_ddl(create) ==
              [
                ~s|CREATE INDEX "posts_category_id_permalink_index" ON "foo"."posts" ("category_id", "permalink")|
              ]
 
-    create = {:create, index(:posts, ["lower(permalink)"], name: "posts$main", prefix: :foo)}
+    create = {:create, index(:posts, ["lower(permalink)"], name: "posts$main", prefix: "foo")}
 
     assert execute_ddl(create) ==
              [~s|CREATE INDEX "posts$main" ON "foo"."posts" (lower(permalink))|]
@@ -2601,7 +2666,7 @@ defmodule Ecto.Adapters.PostgresTest do
 
   test "create index with comment" do
     create =
-      {:create, index(:posts, [:category_id, :permalink], prefix: :foo, comment: "comment")}
+      {:create, index(:posts, [:category_id, :permalink], prefix: "foo", comment: "comment")}
 
     assert execute_ddl(create) == [
              remove_newlines("""
@@ -2727,7 +2792,7 @@ defmodule Ecto.Adapters.PostgresTest do
   end
 
   test "drop index with prefix" do
-    drop = {:drop, index(:posts, [:id], name: "posts$main", prefix: :foo), :restrict}
+    drop = {:drop, index(:posts, [:id], name: "posts$main", prefix: "foo"), :restrict}
     assert execute_ddl(drop) == [~s|DROP INDEX "foo"."posts$main"|]
   end
 
@@ -2741,7 +2806,7 @@ defmodule Ecto.Adapters.PostgresTest do
     drop = {:drop, index(:posts, [:id], name: "posts$main"), :cascade}
     assert execute_ddl(drop) == [~s|DROP INDEX "posts$main" CASCADE|]
 
-    drop = {:drop, index(:posts, [:id], name: "posts$main", prefix: :foo), :cascade}
+    drop = {:drop, index(:posts, [:id], name: "posts$main", prefix: "foo"), :cascade}
     assert execute_ddl(drop) == [~s|DROP INDEX "foo"."posts$main" CASCADE|]
   end
 
@@ -2755,7 +2820,7 @@ defmodule Ecto.Adapters.PostgresTest do
 
   test "rename index with prefix" do
     rename =
-      {:rename, index(:people, [:name], name: "persons_name_index", prefix: :foo),
+      {:rename, index(:people, [:name], name: "persons_name_index", prefix: "foo"),
        "people_name_index"}
 
     assert execute_ddl(rename) == [
@@ -2868,7 +2933,7 @@ defmodule Ecto.Adapters.PostgresTest do
   end
 
   test "rename table with prefix" do
-    rename = {:rename, table(:posts, prefix: :foo), table(:new_posts, prefix: :foo)}
+    rename = {:rename, table(:posts, prefix: "foo"), table(:new_posts, prefix: "foo")}
     assert execute_ddl(rename) == [~s|ALTER TABLE "foo"."posts" RENAME TO "new_posts"|]
   end
 
@@ -2878,7 +2943,7 @@ defmodule Ecto.Adapters.PostgresTest do
   end
 
   test "rename column in prefixed table" do
-    rename = {:rename, table(:posts, prefix: :foo), :given_name, :first_name}
+    rename = {:rename, table(:posts, prefix: "foo"), :given_name, :first_name}
 
     assert execute_ddl(rename) == [
              ~s|ALTER TABLE "foo"."posts" RENAME "given_name" TO "first_name"|
